@@ -201,7 +201,12 @@ tasks.register('buildGhostlockNative', Exec) {
     def output = new File(nativeBuildDir, 'ghostlock')
     workingDir nativeRoot
     doFirst { output.parentFile.mkdirs() }
-    def targetConfigDefine = '-DTARGET_CONFIG_H=' + '\\' + '"kernel/target.h' + '\\' + '"'
+    // Windows re-parses the argument with MSVCRT quoting rules, so the quotes need
+    // backslash escaping there. POSIX passes argv through verbatim and must keep
+    // bare quotes, otherwise clang sees \"kernel/target.h\" as a literal token.
+    def targetConfigDefine = hostIsWindows() ?
+            ('-DTARGET_CONFIG_H=' + '\\' + '"kernel/target.h' + '\\' + '"') :
+            '-DTARGET_CONFIG_H="kernel/target.h"'
     commandLine(([compiler.absolutePath,
                   '--target=aarch64-linux-android34',
                   '-O2', '-flto', '-Wall', '-Wextra', '-Wconversion', '-Wsign-conversion',

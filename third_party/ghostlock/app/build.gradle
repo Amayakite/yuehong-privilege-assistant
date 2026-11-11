@@ -70,6 +70,16 @@ def ndkBinDir = {
     new File(resolveNdkDir(), "toolchains/llvm/prebuilt/${prebuilt}/bin")
 }
 
+// Upstream drove the NDK tools with Windows-only file names. Resolve them per
+// host so the same script also builds on Linux CI and macOS.
+def hostIsWindows = {
+    System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows')
+}
+def hostExeSuffix = { hostIsWindows() ? '.exe' : '' }
+// Windows exposes the target clang driver as a .cmd wrapper; other hosts use
+// the bare executable name.
+def hostClangDriverSuffix = { hostIsWindows() ? '.cmd' : '' }
+
 def resolveCargoExecutable = {
     def executableName = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows') ?
             'cargo.exe' : 'cargo'
@@ -187,7 +197,7 @@ tasks.named('preBuild').configure {
 tasks.register('buildGhostlockNative', Exec) {
     description = 'Build the upstream GhostLock native executable with the Android NDK.'
     def ndk = resolveNdkDir()
-    def compiler = new File(ndkBinDir(), 'clang++.exe')
+    def compiler = new File(ndkBinDir(), "clang++${hostExeSuffix()}")
     def output = new File(nativeBuildDir, 'ghostlock')
     workingDir nativeRoot
     doFirst { output.parentFile.mkdirs() }
@@ -215,7 +225,7 @@ tasks.register('prepareGhostlockJniLibs', Copy) {
     into generatedArm64JniLibs
     rename { 'libghostlock.so' }
     doLast {
-        def strip = new File(ndkBinDir(), 'llvm-strip.exe')
+        def strip = new File(ndkBinDir(), "llvm-strip${hostExeSuffix()}")
         def code = new ProcessBuilder(strip.absolutePath, '--strip-all', packagedBinary.absolutePath)
                 .inheritIO().start().waitFor()
         if (code != 0) throw new GradleException("llvm-strip failed with ${code}")
@@ -225,8 +235,8 @@ tasks.register('prepareGhostlockJniLibs', Copy) {
 tasks.register('buildGhostlockExtract', Exec) {
     description = 'Build the upstream Rust OTA/image extractor.'
     def ndkBin = ndkBinDir()
-    def clang = new File(ndkBin, 'aarch64-linux-android34-clang.cmd').absolutePath
-    def ar = new File(ndkBin, 'llvm-ar.exe').absolutePath
+    def clang = new File(ndkBin, "aarch64-linux-android34-clang${hostClangDriverSuffix()}").absolutePath
+    def ar = new File(ndkBin, "llvm-ar${hostExeSuffix()}").absolutePath
     def cargoCommand = [resolveCargoExecutable()]
     if (useOndk()) cargoCommand << '+ondk'
     cargoCommand.addAll(['build', '--release', '--target', 'aarch64-linux-android'])

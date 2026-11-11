@@ -1,0 +1,141 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: '构建类型（release 需要配置签名 secrets）'
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - debug
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # setup-android 读取该变量决定 SDK 安装位置，并把 ANDROID_HOME 指向同一目录。
+  ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+  # 与根工程 build.gradle 的 ndkVersion 一致；ghostlock/assistant 的原生任务直接读它。
+  ANDROID_NDK_HOME: ${{ github.workspace }}/android-sdk/ndk/29.0.13113456
+
+jobs:
+  build:
+    name: assemble (${{ github.event.inputs.variant || 'release' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: true
+
+      # Platform 37 在 Google 仓库中的包名是 platforms;android-37.0（带小版本号），
+      # 写成 platforms;android-37 会报 package not found。
+      - name: Install SDK components
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-37.0" \
+            "build-tools;36.0.0" \
+            "ndk;29.0.13113456" \
+            "cmake;3.22.1"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --list_installed
+          test -x "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++" \
+            || { echo "::error::NDK 29.0.13113456 未安装到预期路径"; exit 1; }
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            third_party/ghostlock/tools/extract_rs -> ../../build/extract
+            assistant/src/main/jni/vrext -> ../../../../build/native/dirtyfrag-vr
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Write local.properties
+        run: |
+          printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_SDK_ROOT" "$ANDROID_NDK_HOME" > local.properties
+
+      - name: Prepare release signing
+        if: ${{ (github.event.inputs.variant || 'release') == 'release' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=""
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::缺少签名 secrets:$missing。请按 README 的 CI 说明配置，或改用 variant=debug。"
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > release.keystore
+          {
+            echo "storeFile=release.keystore"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > keystore.properties
+          chmod 600 release.keystore keystore.properties
+
+      - name: Build
+        run: |
+          if [ "${{ github.event.inputs.variant || 'release' }}" = "debug" ]; then
+            task=":manager:assembleDebug"
+          else
+            task=":manager:assembleRelease"
+          fi
+          chmod +x gradlew
+          ./gradlew "$task" --no-daemon --stacktrace
+
+      - name: List APK outputs
+        if: always()
+        run: |
+          ls -l out/apk 2>/dev/null || true
+          find manager/build/outputs/apk -name '*.apk' -print 2>/dev/null || true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: yuehong-apk-${{ github.event.inputs.variant || 'release' }}
+          path: |
+            out/apk/*.apk
+            manager/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload mapping
+        if: ${{ (github.event.inputs.variant || 'release') == 'release' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: yuehong-mapping
+          path: out/mapping/*.txt
+          if-no-files-found: warn
+          retention-days: 14
